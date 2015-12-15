@@ -18,6 +18,7 @@ import simplegui, math, random
 # configurations
 WINDOW_SIZE = (800, 600)
 NUM_LIVES = 3
+MAX_ROCK_COUNT = 6
 
 # create cache stores for static assets
 CACHE_STORE = {}
@@ -39,6 +40,10 @@ class ClickEvent:
 class TimerEvent:
     def __init__(self, time):
         self.time = time
+
+class GameEvent:
+    def __init__(self, score):
+        self.score = score
 
 class Dispatcher:
     def __init__(self):
@@ -158,6 +163,11 @@ class Image:
         center destination and size
         """
         canvas.draw_image(self.get_image(), self.get_center(), self.get_size(), center_dest, size_dest, rotation)
+    def draw_animated_at(self, canvas, center_dest, size_dest, rotation = 0, age = 0):
+        center = self.get_center()
+        size = self.get_size()
+        anim_center = (center[0] + (age * size[0]), center[1])
+        canvas.draw_image(self.get_image(), anim_center, size, center_dest, size_dest, rotation)
 
 class Sound:
     def __init__(self, url):
@@ -178,18 +188,25 @@ class Sound:
 
 class Score:
     def __init__(self, lives):
+        self.initial_lives = lives
         self.lives = lives
         self.score = 0
-        dispatcher.add('draw', self.draw)
+    def reset(self):
+        self.lives = self.initial_lives
+        self.score = 0
+    def decrease_lives(self):
+        self.lives -= 1
     def get_lives(self):
         return self.lives
+    def increment_score(self):
+        self.score += 1
     def get_score(self):
         return self.score
     def draw(self, draw_event):
         # set the gutter size
-        gutter_size = 15
+        gutter_size = 24
         # set the font style
-        font_size = 15
+        font_size = 24
         font_color = 'white'
         # create the text
         lives_text = 'Lives: ' + str(self.get_lives())
@@ -307,19 +324,37 @@ class Game:
         dispatcher.run('keyup', key_event)
 
 class AsteroidsGame(Game):
-    def __init__(self, size, lives):
+    def __init__(self, size, lives, max_rock_count):
         # calls the parent constructor
         Game.__init__(self, size)
+        # set the initial game flag
+        self.started = False
+        # set the initial lives
+        self.lives = lives
         # create the Background layer
         self.create_background()
         # creates the Player layer
         self.create_player()
         # spawn rocks every second (1000ms)
         self.spawn_rocks_delay = 1000
-        self.rocks = []
+        # create a new set to hold rocks
+        self.rocks = Group(set(), max_rock_count)
         # creates a new Score layer
         self.score = self.create_score(lives)
+        # creates the splash screen
+        self.create_splash()
+        # create a new group to hold explosions
+        self.explosions = Group(set())
+        # register events
+        dispatcher.add('count', self.check_collisions)
         dispatcher.add('count', self.spawn_rocks)
+        dispatcher.add('game_event', self.check_game)
+    def create_splash(self):
+        size = (400, 300)
+        screen_size = self.get_size()
+        center_position = (screen_size[0] / 2, screen_size[1] / 2)
+        self.splash = SplashScreen(size, center_position)
+        dispatcher.add('click', self.start_game)
     def create_background(self):
         # creates the Space layer
         self.space = Space(self.get_size())
@@ -328,13 +363,16 @@ class AsteroidsGame(Game):
     def create_player(self):
         # creates the player spaceship
         self.player = PlayerSpaceship((90, 90), self.get_center())
+        dispatcher.add('keyup', self.handle_keyup)
+        dispatcher.add('keydown', self.handle_keydown)
     def spawn_rocks(self, timer_event):
-        if timer_event.time % self.spawn_rocks_delay is 0:
-            # create a rock
-            rock = self.create_rock()
-            # clear list and add new one
-            self.rocks = []
-            self.rocks.append(rock)
+        # continue if the game has started
+        if self.started is True:
+            if timer_event.time % self.spawn_rocks_delay is 0:
+                # create a rock
+                rock = self.create_rock()
+                # add a new rock to the rock group
+                self.rocks.add(rock)
     def create_rock(self):
         # generate a random position
         position = (random.randrange(0, self.get_window_width()), random.randrange(0, self.get_window_height()))
@@ -348,16 +386,139 @@ class AsteroidsGame(Game):
         rock = Rock((90, 90), position, velocity, 0, rotation_velocity)
         rock.set_acceleration(acceleration)
         return rock
+    def handle_keyup(self, key_event):
+        # continue if the game has started
+        if self.started is True:
+            self.player.onkeyup(key_event)
+    def handle_keydown(self, key_event):
+        # continue if the game has started
+        if self.started is True:
+            self.player.onkeydown(key_event)
+    def check_collisions(self, timer_event):
+        # continue if the game has started
+        if self.started is True:
+            # iterates through all rocks and checks if
+            # it collides with other objects
+            if self.rocks.exists():
+                for rock in self.rocks.get_all():
+                    # if collides with the player's spaceship
+                    if rock.collide(self.player):
+                        # removes the rock from the rock group
+                        self.rocks.remove(rock)
+                        # create an explosion
+                        self.create_explosion(rock.get_position())
+                        # lose a life
+                        self.score.decrease_lives()
+                        # create a game event
+                        game_event = GameEvent(self.score)
+                        dispatcher.run('game_event', game_event)
+                    # if collides with any missles
+                    collided_missle = rock.collide_group(self.player.get_missles())
+                    if collided_missle is not False:
+                        # removes the rock from the rock group
+                        self.rocks.remove(rock)
+                        # create an explosion
+                        self.create_explosion(rock.get_position())
+                        # removes the missle
+                        self.player.get_missles().remove(collided_missle)
+                        # increment the score
+                        self.score.increment_score()
+                        # create a game event
+                        game_event = GameEvent(self.score)
+                        dispatcher.run('game_event', game_event)
+    def create_explosion(self, position):
+        # create a new explosion
+        explosion = Explosion((128, 128), position)
+        self.explosions.add(explosion)
     def create_score(self, lives):
         score = Score(lives)
+        dispatcher.add('draw', score.draw)
         return score
+    def start_game(self, click_event):
+        # if not yet started
+        if self.started is False:
+            # reset the lives
+            self.score.reset()
+            # hides the splash
+            self.splash.hide()
+            # starts the game
+            self.started = True
+    def check_game(self, game_event):
+        # if no more life
+        if game_event.score.get_lives() <= 0:
+            # resets the game
+            self.reset()
+    def reset(self):
+        # clears all existing rocks
+        self.rocks.clear()
+        # clears all missles
+        self.player.get_missles().clear()
+        # reset the player's position
+        self.player.reset()
+        # recreate the score board
+        self.score.reset()
+        # display the splash
+        self.splash.show()
+        # ends the game
+        self.started = False
     def draw(self, canvas):
         # calls parent method
         Game.draw(self, canvas)
-        if len(self.rocks):
-            for rock in self.rocks:
-                draw_event = DrawEvent(canvas, self.get_frame())
-                rock.draw(draw_event)
+        # continue drawing if started
+        if self.started is True:
+            # create a draw event
+            draw_event = DrawEvent(canvas, self.get_frame())
+            # draw rocks
+            if self.rocks.exists():
+                for rock in self.rocks.get_all():
+                    rock.draw(draw_event)
+            # draw missles
+            if self.player.get_missles().exists():
+                for missle in self.player.get_missles().get_all():
+                    # if missle is expired
+                    if missle.is_expired():
+                        # remove from the missle gorup
+                        self.player.get_missles().remove(missle)
+                    else:
+                        missle.draw(draw_event)
+            # draw explosions
+            if self.explosions.exists():
+                for explosion in self.explosions.get_all():
+                    explosion.draw(draw_event)
+
+class SplashScreen:
+    def __init__(self, size, position):
+        self.hidden = False
+        # sets the size of the background
+        self.size = size
+        # sets the position of the splash screen
+        self.position = position
+        # loads the image
+        self.image = Image('https://www.dropbox.com/s/6qfewgjyf8k3gag/splash.png?dl=1', (400, 300))
+        # loads the sound
+        self.sound = Sound('https://www.dropbox.com/s/7jjgyyz16gubjl4/soundtrack.mp3?dl=1')
+        self.sound.play()
+        # registers the draw handler
+        dispatcher.add('draw', self.draw)
+    def set_size(self, size):
+        self.size = size
+    def get_size(self):
+        return self.size
+    def set_position(self, position):
+        self.position = position
+    def get_position(self):
+        return self.position
+    def show(self):
+        self.sound.rewind()
+        self.sound.play()
+        self.hidden = False
+    def hide(self):
+        self.hidden = True
+    def draw(self, draw_event):
+        # draw only if not hidden
+        if self.hidden is False:
+            # draws the background into the canvas
+            self.image.draw_at(draw_event.canvas, self.get_position(), self.get_size())
 
 class Space:
     def __init__(self, size):
@@ -411,7 +572,7 @@ class Debris:
         self.image.draw_at(draw_event.canvas, center_dest2, size)
 
 class Sprite:
-    def __init__(self, size, position, velocity = (0, 0), rotation = 0, rotation_velocity = 0, lifetime = 0):
+    def __init__(self, size, position, velocity = (0, 0), rotation = 0, rotation_velocity = 0, lifetime = 0, animated = False):
         """
         Creates a new movable object. Set the velocity vector
         to make the object move by default.
@@ -422,12 +583,15 @@ class Sprite:
         <int> rotation              The rotation/angle of the sprite (in radians)
         <int> rotation_velocity     The rotation/angle of the velocity (in radians)
         <int> lifetime              An integer representing when the item can live in ms
+        <bool> animated             A boolean indicating if the sprite should be animated or not
         """
         # sets the initial size
         self.size = size
         # sets the image's center position
         self.set_center((self.size[0] / 2, self.size[1] / 2))
         # sets the initial position
+        self.set_initial_position(position)
+        # sets the new position
         self.set_position(position)
         # sets the initial velocity
         self.set_velocity(velocity)
@@ -444,6 +608,7 @@ class Sprite:
         # sets the age/lifetime
         self.age = 0
         self.lifetime = lifetime
+        self.animated = animated
         # sets the initial accelerating flag
         self.accelerating = False
     def set_size(self, size):
@@ -456,6 +621,10 @@ class Sprite:
         return self.center
     def get_radius(self):
         return self.size[0] / 2
+    def set_initial_position(self, initial_position):
+        self.initial_position = initial_position
+    def get_initial_position(self):
+        return self.initial_position
     def set_position(self, position):
         self.position = position
     def get_position(self):
@@ -531,6 +700,34 @@ class Sprite:
         Returns a boolean indicating if the object is accelerating
         """
         return self.accelerating
+    def is_expired(self):
+        return self.lifetime > 0 and self.age > self.lifetime
+    def get_distance(self, a, b):
+        """
+        Calculates the distance between 2 points
+        """
+        dx = float(b[0]) - a[0]
+        dy = float(b[1]) - a[1]
+        return math.hypot(dx, dy)
+    def collide(self, object):
+        position = self.get_position()
+        radius = self.get_radius()
+        obj_position = object.get_position()
+        obj_radius = object.get_radius()
+        # calculate the distance between the 2 objects
+        dist = self.get_distance(position, obj_position)
+        radius_sum = radius + obj_radius
+        if dist <= radius_sum:
+            return True
+        return False
+    def collide_group(self, group):
+        # checks if the current object collides with the given group of objects
+        # returns the first object it has collided with
+        # otherwise, returns False
+        for object in group.get_all():
+            if self.collide(object):
+                return object
+        return False
     def update(self, draw_event):
         """
         Updates the position of the current sprite based on the the velocity and rotation.
@@ -557,14 +754,48 @@ class Sprite:
         self.age += 1
         # flag to draw or not
         should_draw = True
-        # draw if not yet expired
-        if self.lifetime > 0 and self.age > self.lifetime:
+        # if expired, don't draw
+        if self.is_expired():
             should_draw = False
         if should_draw:
             # updates the positions, and rotations
             self.update(draw_event)
-            # draws the spaceship into the canvas
-            self.image.draw_at(draw_event.canvas, self.get_position(), self.get_size(), self.get_rotation())
+            # draws the sprite into the canvas
+            if self.animated:
+                self.image.draw_animated_at(draw_event.canvas, self.get_position(), self.get_size(), self.get_rotation(), self.age)
+            else:
+                self.image.draw_at(draw_event.canvas, self.get_position(), self.get_size(), self.get_rotation())
+
+class Group:
+    def __init__(self, objects = set(), max_count = None):
+        self.objects = objects
+        self.set_max_count(max_count)
+    def set_max_count(self, max_count):
+        self.max_count = max_count
+    def add(self, object):
+        # add only if hasn't reached the max count
+        if self.max_count is not None:
+            if len(self.objects) < self.max_count:
+                self.objects.add(object)
+        else:
+            self.objects.add(object)
+    def remove(self, object):
+        # make a new set
+        new_set = set()
+        # iterate through current objects and add ones that are not removed
+        for o in self.objects:
+            if o != object:
+                new_set.add(o)
+        # override with the new set
+        self.objects = new_set
+    def clear(self):
+        self.objects = set()
+    def exists(self):
+        return len(self.objects)
+    def count(self):
+        return len(self.objects)
+    def get_all(self):
+        return self.objects
 
 class Rock(Sprite):
     def __init__(self, size, position, velocity = (0, 0), rotation = 0, rotation_velocity = 0):
@@ -594,6 +825,16 @@ class Missle(Sprite):
         # plays the sound
         self.sound.play()
 
+class Explosion(Sprite):
+    def __init__(self, size, position, velocity = (0, 0), rotation = 0, rotation_velocity = 0, lifetime = 24, animated = True):
+        # calls parent method
+        Sprite.__init__(self, size, position, velocity, rotation, rotation_velocity, lifetime, animated)
+        # loads the image
+        self.image = Image('https://www.dropbox.com/s/v3m6oa9u31pbujb/explosion_alpha.png?dl=1', self.size, self.center)
+        # loads the sound
+        self.sound = Sound('https://www.dropbox.com/s/um0ef23cormfr0w/explosion.mp3?dl=1')
+        self.sound.play()
+
 class Spaceship(Sprite):
     def __init__(self, size, position, velocity = (0, 0), rotation = 0, rotation_velocity = 0):
         # calls parent method
@@ -602,6 +843,9 @@ class Spaceship(Sprite):
         self.image = Image('https://www.dropbox.com/s/y2oopsybnllxl3c/double_ship.png?dl=1', self.get_size(), self.get_rest_center())
         # load the sound
         self.sound = Sound('https://www.dropbox.com/s/mmk6t1kzsbz4pju/thrust.mp3?dl=1')
+        # create a new group to hold missles
+        self.missles = Group()
+        # register events
         dispatcher.add('draw', self.draw)
     def get_rest_center(self):
         return (45, 45)
@@ -642,8 +886,10 @@ class Spaceship(Sprite):
         missle_velocity = (velocity[0] + missle_acceleration * forward_vector[0], velocity[1] + missle_acceleration * forward_vector[1])
         # create a new missle
         missle = Missle(size, missle_position, missle_velocity, rotation, 0)
-        # draw missle
-        dispatcher.add('draw', missle.draw)
+        # add to missles group
+        self.missles.add(missle)
+    def get_missles(self):
+        return self.missles
     def update(self, draw_event):
         # if currently rotating
         if self.get_rotation_dir() is "left":
@@ -654,11 +900,12 @@ class Spaceship(Sprite):
         Sprite.update(self, draw_event)
 
 class PlayerSpaceship(Spaceship):
-    def __init__(self, size, position, velocity = (0, 0), rotation = 0, rotation_velocity = 0):
-        # calls parent constructor
-        Spaceship.__init__(self, size, position, velocity, rotation, rotation_velocity)
-        dispatcher.add('keyup', self.onkeyup)
-        dispatcher.add('keydown', self.onkeydown)
+    def reset(self):
+        self.set_position(self.get_initial_position())
+        self.set_velocity((0, 0))
+        self.set_rotation(0)
+        self.rotate_end()
+        self.thrust_stop()
     def onkeyup(self, key_event):
         if key_event.key is simplegui.KEY_MAP['left']: # left
             # stops rotating
@@ -683,12 +930,11 @@ class PlayerSpaceship(Spaceship):
             self.shoot_start()
 
 
-
 # creates a new dispatcher instance
 dispatcher = Dispatcher()
 
 # creates a new game
-game = AsteroidsGame(WINDOW_SIZE, NUM_LIVES)
+game = AsteroidsGame(WINDOW_SIZE, NUM_LIVES, MAX_ROCK_COUNT)
 game.start()
 
 
